@@ -545,16 +545,6 @@ db.uploadKYC = async (userId, { fileName, originalName, filePath, mimeType, docT
         [userId, fileName, originalName, filePath, mimeType, docType]
       );
       
-      // Compulsory Passport Photo AND any 2 ID Docs before marking as Submitted
-      const docsRes = await client.query('SELECT doc_type FROM bank_kyc_docs WHERE user_id = $1', [userId]);
-      const hasPhoto = docsRes.rows.some(r => r.doc_type === 'Photo');
-      const identityDocs = ['Aadhaar', 'PAN', 'Passport'];
-      const uniqueIds = new Set(docsRes.rows.filter(r => identityDocs.includes(r.doc_type)).map(r => r.doc_type));
-      
-      if (hasPhoto && uniqueIds.size >= 2) {
-        await client.query('UPDATE bank_users SET kyc_status = \'Submitted\' WHERE id = $1', [userId]);
-      }
-      
       await client.query('COMMIT');
       return res.rows[0].id;
     } catch (e) {
@@ -579,15 +569,6 @@ db.uploadKYC = async (userId, { fileName, originalName, filePath, mimeType, docT
         status: 'Pending',
         uploaded_at: new Date().toISOString()
       });
-      
-      // Compulsory Passport Photo AND any 2 ID Docs before marking as Submitted
-      const hasPhoto = data.kyc_docs.some(d => d.user_id === userId && d.doc_type === 'Photo');
-      const identityDocs = ['Aadhaar', 'PAN', 'Passport'];
-      const uniqueIds = new Set(data.kyc_docs.filter(d => d.user_id === userId && identityDocs.includes(d.doc_type)).map(d => d.doc_type));
-      
-      if (hasPhoto && uniqueIds.size >= 2) {
-        user.kyc_status = 'Submitted';
-      }
       
       fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
       return id;
@@ -1286,18 +1267,28 @@ app.post('/api/kyc/form-submit', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Please select a valid occupation.' });
     }
 
-    // Compulsory Passport Photo Check for E-Form submission
+    // Compulsory Passport Photo AND any 2 ID Docs before E-Form submission
     let hasPhoto = false;
+    let uniqueIdCount = 0;
     if (isPg) {
       const docsRes = await pool.query('SELECT doc_type FROM bank_kyc_docs WHERE user_id = $1', [req.user.id]);
       hasPhoto = docsRes.rows.some(r => r.doc_type === 'Photo');
+      const identityDocs = ['Aadhaar', 'PAN', 'Passport'];
+      const uniqueIds = new Set(docsRes.rows.filter(r => identityDocs.includes(r.doc_type)).map(r => r.doc_type));
+      uniqueIdCount = uniqueIds.size;
     } else {
       const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
-      hasPhoto = (data.kyc_docs || []).some(d => d.user_id === req.user.id && d.doc_type === 'Photo');
+      const userDocs = (data.kyc_docs || []).filter(d => d.user_id === req.user.id);
+      hasPhoto = userDocs.some(d => d.doc_type === 'Photo');
+      const identityDocs = ['Aadhaar', 'PAN', 'Passport'];
+      const uniqueIds = new Set(userDocs.filter(d => identityDocs.includes(d.doc_type)).map(d => d.doc_type));
+      uniqueIdCount = uniqueIds.size;
     }
 
-    if (!hasPhoto) {
-      return res.status(400).json({ error: 'Passport Photo upload is compulsory before submitting the E-Form. Please upload it first.' });
+    if (!hasPhoto || uniqueIdCount < 2) {
+      return res.status(400).json({ 
+        error: 'You must upload a Passport Photo AND at least 2 ID documents (Aadhaar, PAN, or Passport) before you can submit the E-Form and signature.' 
+      });
     }
 
     await db.saveKycForm(req.user.id, {
