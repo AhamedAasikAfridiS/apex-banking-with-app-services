@@ -3705,6 +3705,17 @@ const htmlTemplate = `
 </html>
 `;
 
+// Health check route for Application Gateway / Load Balancer probes
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'UP', database: isPg ? 'PostgreSQL' : 'JSON Fallback' });
+});
+
+// Explicit health check routes for standard Azure probes
+app.get('/health', (req, res) => res.status(200).send('OK'));
+app.head('/health', (req, res) => res.status(200).end());
+app.head('/', (req, res) => res.status(200).end());
+app.get('/', (req, res) => res.send(htmlTemplate));
+
 // Catch all routes to serve SPA
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
