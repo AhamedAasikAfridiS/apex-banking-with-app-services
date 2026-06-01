@@ -856,11 +856,12 @@ app.post('/api/auth/register', async (req, res) => {
     const user = await db.createUser({ name, email, passwordHash });
 
     // Set Auth Cookie
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '2h' });
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role || 'user' }, JWT_SECRET, { expiresIn: '2h' });
+    const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
     res.cookie('auth_token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'strict',
       maxAge: 2 * 60 * 60 * 1000 // 2 Hours
     });
 
