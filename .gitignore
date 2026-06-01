@@ -1,0 +1,17 @@
+# Dependency directories
+node_modules/
+
+# Local database file and state
+database.json
+
+# Local environment variables / secrets
+.env
+
+# Uploaded verification documents
+uploads/*
+!uploads/.gitkeep
+
+# Logs and system files
+*.log
+.DS_Store
+Thumbs.db
