@@ -221,7 +221,19 @@ async function initDb() {
         submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log('PostgreSQL database tables initialized.');
+
+    // Seed default admin
+    const adminEmail = 'admin@apex.com';
+    const checkAdmin = await pool.query('SELECT * FROM bank_users WHERE email = $1', [adminEmail]);
+    if (checkAdmin.rows.length === 0) {
+      const salt = await bcrypt.genSalt(10);
+      const hash = await bcrypt.hash('admin123', salt);
+      await pool.query(
+        'INSERT INTO bank_users (name, email, password_hash, role, kyc_status, balance) VALUES ($1, $2, $3, $4, $5, $6)',
+        ['System Admin', adminEmail, hash, 'admin', 'Verified', 0]
+      );
+    }
+    console.log('PostgreSQL database tables and admin seeded.');
   } catch (error) {
     console.error('PostgreSQL connection failed:', error.message);
     console.log('Falling back to local JSON file storage (database.json)...');
@@ -230,6 +242,25 @@ async function initDb() {
     // Setup JSON DB files
     if (!fs.existsSync(JSON_DB_PATH)) {
       fs.writeFileSync(JSON_DB_PATH, JSON.stringify({ users: [], transactions: [], kyc_docs: [], audit_logs: [], kyc_forms: [] }, null, 2));
+    }
+    
+    // Seed default admin in JSON
+    const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
+    const adminEmail = 'admin@apex.com';
+    if (!data.users.find(u => u.email === adminEmail)) {
+      const salt = await bcrypt.genSalt(10);
+      const hash = await bcrypt.hash('admin123', salt);
+      data.users.push({
+        id: data.users.length > 0 ? Math.max(...data.users.map(u => u.id)) + 1 : 1,
+        name: 'System Admin',
+        email: adminEmail,
+        password_hash: hash,
+        balance: 0,
+        kyc_status: 'Verified',
+        role: 'admin',
+        created_at: new Date().toISOString()
+      });
+      fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
     }
   }
 }
@@ -2118,6 +2149,12 @@ const htmlTemplate = `
         
         <div class="auth-footer">
           Don't have an account? <a href="#register" class="auth-link" onclick="toggleAuthView('register')">Register here</a>
+        </div>
+
+        <div style="margin-top: 20px; padding: 15px; background: rgba(94, 96, 206, 0.1); border: 1px solid rgba(94, 96, 206, 0.3); border-radius: 8px; font-size: 0.85rem; color: var(--text-gray); text-align: center;">
+          <strong>Demo Admin Access:</strong><br>
+          Select "Administrative Console" Role<br>
+          Email: <code>admin@apex.com</code> | Pass: <code>admin123</code>
         </div>
       </div>
       
