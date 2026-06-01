@@ -36,6 +36,7 @@ const cookieParser = require('cookie-parser');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { BlobServiceClient } = require('@azure/storage-blob');
 require('dotenv').config();
 
 const app = express();
@@ -48,6 +49,42 @@ const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
+
+// -------------------------------------------------------------
+// AZURE BLOB STORAGE SETUP (with RA-GRS Geo-Redundancy Fallback)
+// -------------------------------------------------------------
+let blobServiceClient = null;
+let containerClient = null;
+const containerName = 'kyc-documents';
+
+function initAzureStorage() {
+  const connStr = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  if (!connStr || connStr.includes('your_account_name')) {
+    console.warn('[AZURE STORAGE] Connection String is not configured. Falling back to local filesystem (uploads/) for KYC documents.');
+    return;
+  }
+  
+  try {
+    // Parse the Storage Account Name to build the secondary endpoint for RA-GRS
+    const match = connStr.match(/AccountName=([^;]+)/);
+    const accountName = match ? match[1] : null;
+    const options = {};
+    
+    if (accountName) {
+      options.geoRedundantSecondaryUri = `https://${accountName}-secondary.blob.core.windows.net`;
+      console.log(`[AZURE STORAGE] Configuring with Geo-Redundant secondary URI: ${options.geoRedundantSecondaryUri}`);
+    }
+    
+    blobServiceClient = BlobServiceClient.fromConnectionString(connStr, options);
+    containerClient = blobServiceClient.getContainerClient(containerName);
+    console.log('[AZURE STORAGE] Client initialized successfully.');
+  } catch (error) {
+    console.error('[AZURE STORAGE] Initialization failed:', error.message);
+  }
+}
+
+// Initialize Azure Storage client
+initAzureStorage();
 
 // -------------------------------------------------------------
 // DATABASE SETUP & CONFIGURATION (PostgreSQL / JSON Fallback)
@@ -97,6 +134,16 @@ if (sslEnabled) {
 
 // Attempt PG Connection & Initialize Database Helper Interface
 async function initDb() {
+  // Ensure Azure Storage container exists if client is active
+  if (containerClient) {
+    try {
+      await containerClient.createIfNotExists();
+      console.log(`[AZURE STORAGE] Container "${containerName}" is ready.`);
+    } catch (err) {
+      console.error(`[AZURE STORAGE] Container verification failed:`, err.message);
+    }
+  }
+
   try {
     console.log('Connecting to PostgreSQL database...');
     pool = new Pool(dbConfig);
@@ -1032,12 +1079,37 @@ app.post('/api/kyc/upload', authenticateToken, (req, res) => {
       return res.status(400).json({ error: 'Please choose a valid file to upload.' });
     }
 
+    const docType = req.body.doc_type || 'Document';
+    let finalFilePath = req.file.path;
+
+    // If Azure Storage is configured, upload to Azure and delete local copy
+    if (containerClient) {
+      try {
+        const blobName = req.file.filename;
+        const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+        
+        // Upload to Azure
+        await blockBlobClient.uploadFile(req.file.path);
+        console.log(`[AZURE STORAGE] Uploaded blob "${blobName}" successfully.`);
+        
+        // Update database file path to point to Azure
+        finalFilePath = `azure://${containerName}/${blobName}`;
+
+        // Delete the temporary local file
+        fs.unlink(req.file.path, (unlinkErr) => {
+          if (unlinkErr) console.error('[AZURE STORAGE] Failed to delete local temp file:', unlinkErr.message);
+        });
+      } catch (azureErr) {
+        console.error('[AZURE STORAGE] Blob upload failed:', azureErr.message);
+        return res.status(500).json({ error: 'Failed to upload document to cloud storage.' });
+      }
+    }
+
     try {
-      const docType = req.body.doc_type || 'Document';
       const docId = await db.uploadKYC(req.user.id, {
         fileName: req.file.filename,
         originalName: `${docType}: ${req.file.originalname}`,
-        filePath: req.file.path,
+        filePath: finalFilePath,
         mimeType: req.file.mimetype,
         docType: docType
       });
@@ -1227,12 +1299,31 @@ app.get('/api/kyc/download/:filename', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Document file not found.' });
     }
 
-    const filePath = path.join(uploadDir, filename);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'File physical record deleted.' });
+    // Clean up filename for header compatibility
+    const safeName = doc.original_name.replace(/[:\\/]/g, '_');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}"`);
+    res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
+
+    // Stream from Azure if URI is azure:// and client is initialized
+    if (doc.file_path && doc.file_path.startsWith('azure://') && containerClient) {
+      try {
+        const blockBlobClient = containerClient.getBlockBlobClient(filename);
+        
+        // This initiates the download stream from Azure (supporting automatic failover retry if using RA-GRS options)
+        const downloadResponse = await blockBlobClient.download(0);
+        downloadResponse.readableStreamBody.pipe(res);
+        return;
+      } catch (azureErr) {
+        console.error('[AZURE STORAGE] Download from blob failed, attempting local fallback:', azureErr.message);
+      }
     }
 
-    res.download(filePath, doc.original_name);
+    // Local file fallback (for backward compatibility)
+    const localFilePath = path.join(uploadDir, filename);
+    if (!fs.existsSync(localFilePath)) {
+      return res.status(404).json({ error: 'File physical record deleted.' });
+    }
+    fs.createReadStream(localFilePath).pipe(res);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to retrieve files.' });
