@@ -224,6 +224,7 @@ async function initDb() {
     `);
 
     // Seed default admin
+    await pool.query("DELETE FROM bank_users WHERE email = 'admin@apexbank.com'");
     const adminEmail = 'admin@apex.com';
     const checkAdmin = await pool.query('SELECT * FROM bank_users WHERE email = $1', [adminEmail]);
     if (checkAdmin.rows.length === 0) {
@@ -247,6 +248,7 @@ async function initDb() {
     
     // Seed default admin in JSON
     const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
+    data.users = (data.users || []).filter(u => u.email !== 'admin@apexbank.com');
     const adminEmail = 'admin@apex.com';
     if (!data.users.find(u => u.email === adminEmail)) {
       const salt = await bcrypt.genSalt(10);
