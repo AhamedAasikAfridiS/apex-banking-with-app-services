@@ -2825,7 +2825,7 @@ const htmlTemplate = `
 
     // Admin: Reset all data except admin credentials
     async function resetDatabase() {
-      const confirmed = confirm('⚠️ WARNING: This will permanently delete ALL users, transactions, and KYC data.\\n\\nAdmin credentials will be preserved.\\n\\nAre you absolutely sure?');
+      const confirmed = confirm('[WARNING] This will permanently delete ALL users, transactions, and KYC data.\\n\\nAdmin credentials will be preserved.\\n\\nAre you absolutely sure?');
       if (!confirmed) return;
       const btn = document.getElementById('btn-reset-db');
       btn.disabled = true;
@@ -2843,7 +2843,7 @@ const htmlTemplate = `
         triggerToast('Network error during reset.', 'error');
       } finally {
         btn.disabled = false;
-        btn.textContent = '🗑️ Reset All Data';
+        btn.textContent = 'Reset All Data';
       }
     }
     let signatureDrawn = false;
