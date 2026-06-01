@@ -512,7 +512,17 @@ db.uploadKYC = async (userId, { fileName, originalName, filePath, mimeType, docT
         'INSERT INTO bank_kyc_docs (user_id, file_name, original_name, file_path, mime_type, doc_type, status) VALUES ($1, $2, $3, $4, $5, $6, \'Pending\') RETURNING id',
         [userId, fileName, originalName, filePath, mimeType, docType]
       );
-      await client.query('UPDATE bank_users SET kyc_status = \'Submitted\' WHERE id = $1', [userId]);
+      
+      // Compulsory Passport Photo AND any 2 ID Docs before marking as Submitted
+      const docsRes = await client.query('SELECT doc_type FROM bank_kyc_docs WHERE user_id = $1', [userId]);
+      const hasPhoto = docsRes.rows.some(r => r.doc_type === 'Photo');
+      const identityDocs = ['Aadhaar', 'PAN', 'Passport'];
+      const uniqueIds = new Set(docsRes.rows.filter(r => identityDocs.includes(r.doc_type)).map(r => r.doc_type));
+      
+      if (hasPhoto && uniqueIds.size >= 2) {
+        await client.query('UPDATE bank_users SET kyc_status = \'Submitted\' WHERE id = $1', [userId]);
+      }
+      
       await client.query('COMMIT');
       return res.rows[0].id;
     } catch (e) {
@@ -525,7 +535,6 @@ db.uploadKYC = async (userId, { fileName, originalName, filePath, mimeType, docT
     const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
     const user = data.users.find(u => u.id === userId);
     if (user) {
-      user.kyc_status = 'Submitted';
       const id = data.kyc_docs.length + 1;
       data.kyc_docs.push({
         id,
@@ -538,6 +547,16 @@ db.uploadKYC = async (userId, { fileName, originalName, filePath, mimeType, docT
         status: 'Pending',
         uploaded_at: new Date().toISOString()
       });
+      
+      // Compulsory Passport Photo AND any 2 ID Docs before marking as Submitted
+      const hasPhoto = data.kyc_docs.some(d => d.user_id === userId && d.doc_type === 'Photo');
+      const identityDocs = ['Aadhaar', 'PAN', 'Passport'];
+      const uniqueIds = new Set(data.kyc_docs.filter(d => d.user_id === userId && identityDocs.includes(d.doc_type)).map(d => d.doc_type));
+      
+      if (hasPhoto && uniqueIds.size >= 2) {
+        user.kyc_status = 'Submitted';
+      }
+      
       fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
       return id;
     }
@@ -1217,6 +1236,34 @@ app.post('/api/kyc/form-submit', authenticateToken, async (req, res) => {
 
     if (!dob || !address || !taxId || !income || !occupation || !signatureData) {
       return res.status(400).json({ error: 'All fields and signature are required.' });
+    }
+
+    const dobDate = new Date(dob);
+    if (isNaN(dobDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid Date of Birth format.' });
+    }
+    const age = (new Date() - dobDate) / (1000 * 60 * 60 * 24 * 365.25);
+    if (age < 18) {
+      return res.status(400).json({ error: 'You must be at least 18 years old to submit this form.' });
+    }
+
+    const validOccupations = ['Salaried Employee', 'Self-Employed / Business', 'Student', 'Retired', 'Professional'];
+    if (!validOccupations.includes(occupation)) {
+      return res.status(400).json({ error: 'Please select a valid occupation.' });
+    }
+
+    // Compulsory Passport Photo Check for E-Form submission
+    let hasPhoto = false;
+    if (isPg) {
+      const docsRes = await pool.query('SELECT doc_type FROM bank_kyc_docs WHERE user_id = $1', [req.user.id]);
+      hasPhoto = docsRes.rows.some(r => r.doc_type === 'Photo');
+    } else {
+      const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
+      hasPhoto = (data.kyc_docs || []).some(d => d.user_id === req.user.id && d.doc_type === 'Photo');
+    }
+
+    if (!hasPhoto) {
+      return res.status(400).json({ error: 'Passport Photo upload is compulsory before submitting the E-Form. Please upload it first.' });
     }
 
     await db.saveKycForm(req.user.id, {
@@ -2478,7 +2525,7 @@ const htmlTemplate = `
                       <div class="form-group">
                         <label class="form-label">Draw your Digital Signature below</label>
                         <div style="background: #ffffff; border-radius: 8px; border: var(--border-thin); overflow: hidden; padding: 5px; position: relative;">
-                          <canvas id="signature-pad" width="420" height="150" style="width: 100%; height: 150px; background: #fafafa; border: 1px solid rgba(0,0,0,0.1); border-radius: 6px; cursor: crosshair; display: block;"></canvas>
+                          <canvas id="signature-pad" width="420" height="150" style="width: 100%; height: 150px; background: #fafafa; border: 1px solid rgba(0,0,0,0.1); border-radius: 6px; cursor: crosshair; display: block; touch-action: none;"></canvas>
                         </div>
                         <div style="display: flex; justify-content: flex-end; margin-top: 8px; gap: 10px;">
                           <button type="button" class="btn btn-secondary" onclick="clearSignaturePad()" style="padding: 6px 12px; width: auto; font-size: 0.8rem; border-radius: 6px;">Clear Pad</button>
@@ -3255,14 +3302,19 @@ const htmlTemplate = `
     let canvas = null;
     let ctx = null;
     let drawing = false;
+    let signaturePadInitialized = false;
     
     function initSignaturePad() {
+      if (signaturePadInitialized) {
+        clearSignaturePad();
+        return;
+      }
       canvas = document.getElementById('signature-pad');
       if (!canvas) return;
       ctx = canvas.getContext('2d');
       
-      canvas.width = canvas.clientWidth;
-      canvas.height = canvas.clientHeight;
+      canvas.width = canvas.clientWidth || 420;
+      canvas.height = canvas.clientHeight || 150;
       
       ctx.strokeStyle = '#1e293b';
       ctx.lineWidth = 3;
@@ -3299,6 +3351,7 @@ const htmlTemplate = `
         e.preventDefault();
       });
       canvas.addEventListener('touchend', stopDrawing);
+      signaturePadInitialized = true;
     }
     
     function startDrawing(e) {
