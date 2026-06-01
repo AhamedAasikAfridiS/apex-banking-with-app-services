@@ -40,6 +40,7 @@ const { BlobServiceClient } = require('@azure/storage-blob');
 require('dotenv').config();
 
 const app = express();
+app.set('trust proxy', 1); // Trust Azure Application Gateway / reverse proxy
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'apex_banking_super_secret_cryptographic_key_9988';
 const JSON_DB_PATH = path.join(__dirname, 'database.json');
@@ -906,10 +907,11 @@ app.post('/api/auth/login', async (req, res) => {
 
     // Set Token Cookie
     const token = jwt.sign({ id: user.id, email: user.email, role: user.role || 'user' }, JWT_SECRET, { expiresIn: '2h' });
+    const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
     res.cookie('auth_token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'strict',
       maxAge: 2 * 60 * 60 * 1000
     });
 
