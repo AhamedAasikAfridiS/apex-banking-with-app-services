@@ -1408,6 +1408,34 @@ app.get('/api/kyc/download/:filename', authenticateToken, async (req, res) => {
   }
 });
 
+// Admin Route: Reset Database (wipe all non-admin test data)
+app.post('/api/admin/reset-data', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    if (isPg) {
+      // Delete all transactions, audit logs, kyc forms, kyc docs, then non-admin users
+      await pool.query('DELETE FROM bank_transactions');
+      await pool.query('DELETE FROM bank_audit_logs');
+      await pool.query('DELETE FROM bank_kyc_forms');
+      await pool.query('DELETE FROM bank_kyc_docs');
+      await pool.query("DELETE FROM bank_users WHERE role != 'admin'");
+    } else {
+      const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
+      const adminUsers = data.users.filter(u => u.role === 'admin');
+      data.users = adminUsers;
+      data.transactions = [];
+      data.kyc_docs = [];
+      data.audit_logs = [];
+      data.kyc_forms = [];
+      fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
+    }
+    console.log('[ADMIN] Database reset performed by admin:', req.user.id);
+    res.json({ message: 'Database reset successfully. All test data has been cleared. Admin credentials preserved.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to reset database.' });
+  }
+});
+
 // -------------------------------------------------------------
 // FRONTEND WEB USER INTERFACE (HTML, CSS, JS Bundle template)
 // -------------------------------------------------------------
@@ -2702,6 +2730,23 @@ const htmlTemplate = `
                 </table>
               </div>
             </div>
+
+            <!-- Danger Zone: Reset Database -->
+            <div class="card" style="margin-top: 30px; border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.04);">
+              <div class="card-header" style="border-bottom-color: rgba(239, 68, 68, 0.2);">
+                <h3 class="card-title" style="color: #ef4444;">⚠️ Danger Zone</h3>
+              </div>
+              <div style="padding: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 15px;">
+                <div>
+                  <div style="font-weight: 600; color: var(--text-white); margin-bottom: 5px;">Reset Database</div>
+                  <div style="font-size: 0.85rem; color: var(--text-gray);">Permanently deletes ALL registered users, transactions, KYC documents and audit logs. Admin credentials will be preserved.</div>
+                </div>
+                <button id="btn-reset-db" onclick="resetDatabase()" style="background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.5); padding: 10px 22px; border-radius: 8px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all 0.2s;" onmouseover="this.style.background='rgba(239,68,68,0.3)'" onmouseout="this.style.background='rgba(239,68,68,0.15)'">
+                  🗑️ Reset All Data
+                </button>
+              </div>
+            </div>
+
           </div>
           
         </main>
@@ -2775,6 +2820,30 @@ const htmlTemplate = `
     let activityChart = null;
     let breakdownChart = null;
     let adminUsers = [];
+
+    // Admin: Reset all data except admin credentials
+    async function resetDatabase() {
+      const confirmed = confirm('⚠️ WARNING: This will permanently delete ALL users, transactions, and KYC data.\n\nAdmin credentials will be preserved.\n\nAre you absolutely sure?');
+      if (!confirmed) return;
+      const btn = document.getElementById('btn-reset-db');
+      btn.disabled = true;
+      btn.textContent = 'Resetting...';
+      try {
+        const res = await fetch('/api/admin/reset-data', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          triggerToast(data.message, 'success');
+          loadAdminData();
+        } else {
+          triggerToast(data.error || 'Reset failed.', 'error');
+        }
+      } catch (e) {
+        triggerToast('Network error during reset.', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🗑️ Reset All Data';
+      }
+    }
     let signatureDrawn = false;
     let userKycStatus = 'Pending';
     
