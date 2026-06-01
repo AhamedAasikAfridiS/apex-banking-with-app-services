@@ -3716,6 +3716,12 @@ app.head('/health', (req, res) => res.status(200).end());
 app.head('/', (req, res) => res.status(200).end());
 app.get('/', (req, res) => res.send(htmlTemplate));
 
+// Base API paths for path-based routing probes (api-route)
+app.get('/api', (req, res) => res.status(200).send('API OK'));
+app.get('/api/', (req, res) => res.status(200).send('API OK'));
+app.head('/api', (req, res) => res.status(200).end());
+app.head('/api/', (req, res) => res.status(200).end());
+
 // Catch all routes to serve SPA
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
