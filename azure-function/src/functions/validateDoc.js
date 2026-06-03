@@ -10,7 +10,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || process.env.AZURE_POSTGRESQL_CONNECTION_STRING
 });
 
-app.storageBlob('validateDoc', {
+app.storageBlob('BlobTrigger1', {
   path: 'kyc-documents/{name}',
   connection: 'AZURE_STORAGE_CONNECTION_STRING',
   handler: async (blob, context) => {
