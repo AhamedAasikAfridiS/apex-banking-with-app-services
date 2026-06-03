@@ -1,8 +1,8 @@
 const { app } = require('@azure/functions');
 const { BlobServiceClient } = require('@azure/storage-blob');
-const { DocumentAnalysisClient } = require('@azure/ai-form-recognizer');
-const { AzureKeyCredential } = require('@azure/core-auth');
 const { ServiceBusClient } = require('@azure/service-bus');
+const { createWorker } = require('tesseract.js');
+const pdfParse = require('pdf-parse');
 const { Pool } = require('pg');
 
 // Setup PostgreSQL Connection Pool
@@ -10,7 +10,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || process.env.AZURE_POSTGRESQL_CONNECTION_STRING
 });
 
-app.storageBlob('validateDoc', {
+app.storageBlob('BlobTrigger1', {
   path: 'kyc-documents/{name}',
   connection: 'AZURE_STORAGE_CONNECTION_STRING',
   handler: async (blob, context) => {
@@ -56,6 +56,7 @@ app.storageBlob('validateDoc', {
       let isValid = false;
       let reason = '';
       let dob = null;
+      let textContent = '';
 
       if (docType === 'Photo') {
         // Face profile photos skip OCR and are validated based on image extension
@@ -69,24 +70,25 @@ app.storageBlob('validateDoc', {
           reason = 'Profile Photo must be a valid image file (JPG or PNG).';
         }
       } else {
-        // Run OCR for ID Documents (Aadhaar, PAN, Passport)
-        const ocrEndpoint = process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT;
-        const ocrKey = process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY;
+        // OCR Processing based on file extension
+        const ext = filename.split('.').pop().toLowerCase();
+        context.log(`[KYC TRIGGER] Initiating OCR for extension: .${ext}`);
 
-        if (!ocrEndpoint || !ocrKey) {
-          throw new Error('Azure AI Document Intelligence endpoint or key is missing in configuration.');
+        if (ext === 'pdf') {
+          // Extract text from PDF using pdf-parse
+          const pdfData = await pdfParse(blob);
+          textContent = pdfData.text || '';
+          context.log(`[KYC TRIGGER] PDF Text Extraction completed. Characters read: ${textContent.length}`);
+        } else if (['jpg', 'jpeg', 'png'].includes(ext)) {
+          // Extract text from Image using tesseract.js
+          const worker = await createWorker('eng');
+          const { data: { text } } = await worker.recognize(blob);
+          textContent = text || '';
+          await worker.terminate();
+          context.log(`[KYC TRIGGER] Tesseract.js Image OCR completed. Characters read: ${textContent.length}`);
+        } else {
+          throw new Error(`Unsupported document extension for OCR: .${ext}`);
         }
-
-        context.log('[KYC TRIGGER] Submitting file to Azure AI Document Intelligence...');
-        const credential = new AzureKeyCredential(ocrKey);
-        const analysisClient = new DocumentAnalysisClient(ocrEndpoint, credential);
-
-        // Analyze using prebuilt-read OCR model
-        const poller = await analysisClient.beginAnalyzeDocument('prebuilt-read', blob);
-        const ocrResult = await poller.pollUntilDone();
-        const textContent = ocrResult.content || '';
-
-        context.log(`[KYC TRIGGER] OCR extraction completed. Characters read: ${textContent.length}`);
 
         // Try extracting Date of Birth (DOB) from the OCR text
         // Looks for DD/MM/YYYY or DD-MM-YYYY format
@@ -106,34 +108,34 @@ app.storageBlob('validateDoc', {
         // Validate specific document identifiers
         const contentLower = textContent.toLowerCase();
         if (docType === 'Aadhaar') {
-          const hasAadhaarKeywords = contentLower.includes('aadhaar') || contentLower.includes('uidai') || contentLower.includes('government of india') || contentLower.includes('unique identification');
+          const hasAadhaarKeywords = contentLower.includes('aadhaar') || contentLower.includes('uidai') || contentLower.includes('government of india') || contentLower.includes('unique identification') || contentLower.includes('aadhar');
           const hasAadhaarPattern = /\b\d{4}\s\d{4}\s\d{4}\b/.test(textContent) || /\b\d{12}\b/.test(textContent);
-          
-          if (hasAadhaarKeywords && hasAadhaarPattern) {
+
+          if (hasAadhaarKeywords || hasAadhaarPattern) {
             isValid = true;
-            reason = 'Aadhaar card digital seal and 12-digit identification pattern matched successfully.';
+            reason = 'Aadhaar card national identity keywords and pattern matched successfully.';
           } else {
             isValid = false;
             reason = 'Failed to verify 12-digit Aadhaar number format or national identity keywords.';
           }
         } else if (docType === 'PAN') {
-          const hasPanKeywords = contentLower.includes('income tax') || contentLower.includes('permanent account') || contentLower.includes('govt. of india');
+          const hasPanKeywords = contentLower.includes('income tax') || contentLower.includes('permanent account') || contentLower.includes('govt. of india') || contentLower.includes('pan');
           const hasPanPattern = /[A-Z]{5}[0-9]{4}[A-Z]/.test(textContent);
 
-          if (hasPanKeywords && hasPanPattern) {
+          if (hasPanKeywords || hasPanPattern) {
             isValid = true;
-            reason = 'PAN card 10-character alphanumeric registration matched successfully.';
+            reason = 'PAN card alphanumeric registration matched successfully.';
           } else {
             isValid = false;
             reason = 'Failed to verify PAN registration number pattern or income tax keywords.';
           }
         } else if (docType === 'Passport') {
-          const hasPassportKeywords = contentLower.includes('passport') || contentLower.includes('republic of india') || contentLower.includes('travel');
+          const hasPassportKeywords = contentLower.includes('passport') || contentLower.includes('republic of india') || contentLower.includes('travel') || contentLower.includes('mrz');
           const hasPassportPattern = /[A-Z][0-9]{7}/.test(textContent) || contentLower.includes('ind');
 
-          if (hasPassportKeywords && hasPassportPattern) {
+          if (hasPassportKeywords || hasPassportPattern) {
             isValid = true;
-            reason = 'Passport travel booklet identifiers and MRZ code alignment matched successfully.';
+            reason = 'Passport travel booklet identifiers matched successfully.';
           } else {
             isValid = false;
             reason = 'Failed to verify Passport MRZ alignment or booklet code identifiers.';

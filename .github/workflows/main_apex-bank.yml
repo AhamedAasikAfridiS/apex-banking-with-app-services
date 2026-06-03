@@ -52,4 +52,4 @@ jobs:
           app-name: 'apex-bank'
           slot-name: 'Production'
           package: .
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_4802BC41EC394C199D2A4E156E502962 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_A72314F3E1EB421CAA75F40EA98AF166 }}
