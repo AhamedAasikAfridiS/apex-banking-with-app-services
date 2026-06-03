@@ -110,7 +110,7 @@ app.storageBlob('validateDoc', {
         if (docType === 'Aadhaar') {
           const hasAadhaarKeywords = contentLower.includes('aadhaar') || contentLower.includes('uidai') || contentLower.includes('government of india') || contentLower.includes('unique identification') || contentLower.includes('aadhar');
           const hasAadhaarPattern = /\b\d{4}\s\d{4}\s\d{4}\b/.test(textContent) || /\b\d{12}\b/.test(textContent);
-          
+
           if (hasAadhaarKeywords || hasAadhaarPattern) {
             isValid = true;
             reason = 'Aadhaar card national identity keywords and pattern matched successfully.';
