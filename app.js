@@ -37,6 +37,8 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { BlobServiceClient } = require('@azure/storage-blob');
+const { ServiceBusClient } = require('@azure/service-bus');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
@@ -86,6 +88,287 @@ function initAzureStorage() {
 
 // Initialize Azure Storage client
 initAzureStorage();
+
+// -------------------------------------------------------------
+// NODEMAILER SMTP EMAIL SERVICE
+// -------------------------------------------------------------
+let mailTransporter = null;
+
+function initMailTransporter() {
+  const host = process.env.SMTP_HOST;
+  const port = process.env.SMTP_PORT || 587;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  if (!host || !user || !pass) {
+    console.warn('[EMAIL SERVICE] SMTP configuration is incomplete. Emails will be logged to the console.');
+    return;
+  }
+
+  try {
+    mailTransporter = nodemailer.createTransport({
+      host: host,
+      port: parseInt(port),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user, pass }
+    });
+    console.log('[EMAIL SERVICE] Nodemailer transporter configured.');
+  } catch (error) {
+    console.error('[EMAIL SERVICE] Configuration failed:', error.message);
+  }
+}
+
+initMailTransporter();
+
+async function sendKYCStatusEmail(email, docType, status, reason) {
+  const subject = `[Apex Bank] KYC Document Verification: ${status === 'Verified' ? 'Approved' : 'Rejected'}`;
+  const text = `Dear Customer,
+
+Your uploaded document of type "${docType}" has been processed and ${status === 'Verified' ? 'APPROVED' : 'REJECTED'}.
+
+Detail: ${reason}
+
+Thank you,
+Apex Premium Banking Security Team`;
+
+  if (mailTransporter) {
+    try {
+      await mailTransporter.sendMail({
+        from: `"${process.env.SMTP_FROM_NAME || 'Apex Bank'}" <${process.env.SMTP_FROM_EMAIL || 'security@apexbank.com'}>`,
+        to: email,
+        subject: subject,
+        text: text
+      });
+      console.log(`[EMAIL SERVICE] Email sent successfully to ${email}`);
+    } catch (error) {
+      console.error(`[EMAIL SERVICE] Failed to send email to ${email}:`, error.message);
+    }
+  } else {
+    console.log(`\n================================================================`);
+    console.log(`[MOCK EMAIL SERVICE] SENDING OUTBOUND EMAIL`);
+    console.log(`To: ${email}`);
+    console.log(`Subject: ${subject}`);
+    console.log(`Body:\n${text}`);
+    console.log(`================================================================\n`);
+  }
+}
+
+// -------------------------------------------------------------
+// AZURE SERVICE BUS SETUP & LISTENER
+// -------------------------------------------------------------
+let serviceBusClient = null;
+const queueName = 'kyc-notifications';
+
+function initServiceBus() {
+  const connStr = process.env.AZURE_SERVICE_BUS_CONNECTION_STRING;
+  if (!connStr || connStr.includes('your_connection_string')) {
+    console.warn('[SERVICE BUS] Connection String is not configured. Falling back to local in-memory event loop.');
+    return;
+  }
+
+  try {
+    serviceBusClient = new ServiceBusClient(connStr);
+    console.log('[SERVICE BUS] Client initialized successfully.');
+    startServiceBusListener();
+  } catch (error) {
+    console.error('[SERVICE BUS] Initialization failed:', error.message);
+  }
+}
+
+function startServiceBusListener() {
+  if (!serviceBusClient) return;
+  const receiver = serviceBusClient.createReceiver(queueName);
+
+  receiver.subscribe({
+    processMessage: async (message) => {
+      try {
+        const body = message.body;
+        console.log(`[SERVICE BUS] Received notification:`, body);
+        const payload = typeof body === 'string' ? JSON.parse(body) : body;
+        
+        await handleKYCNotification(payload);
+        await message.complete();
+      } catch (err) {
+        console.error(`[SERVICE BUS] Error processing message:`, err.message);
+      }
+    },
+    processError: async (args) => {
+      console.error(`[SERVICE BUS] Listener error:`, args.error);
+    }
+  });
+  console.log(`[SERVICE BUS] Subscribed to queue "${queueName}"`);
+}
+
+// -------------------------------------------------------------
+// MOCK SERVICE BUS FOR LOCAL FALLBACK
+// -------------------------------------------------------------
+const localQueue = [];
+
+async function publishMockServiceBusMessage(payload) {
+  console.log('[MOCK SERVICE BUS] Publishing message:', payload);
+  localQueue.push(payload);
+  
+  setTimeout(async () => {
+    const msg = localQueue.shift();
+    if (msg) {
+      try {
+        console.log('[MOCK SERVICE BUS] Delivering message to receiver:', msg);
+        await handleKYCNotification(msg);
+      } catch (err) {
+        console.error('[MOCK SERVICE BUS] Delivery handler error:', err.message);
+      }
+    }
+  }, 800);
+}
+
+// -------------------------------------------------------------
+// KYC NOTIFICATION HANDLER (SHARED BY SERVICE BUS & MOCK QUEUE)
+// -------------------------------------------------------------
+async function handleKYCNotification(payload) {
+  const { userId, docId, docType, status, reason, fileName, email } = payload;
+  console.log(`[KYC HANDLER] Processing notification for User ${userId} | Doc ${docId} (${docType}) -> ${status}`);
+
+  // 1. Update Document Status in Database
+  const finalFilePath = containerClient 
+    ? `azure://processed-and-validated-container/${fileName}`
+    : `uploads/processed_and_validated/${fileName}`;
+
+  if (isPg) {
+    await pool.query(
+      'UPDATE bank_kyc_docs SET status = $1, file_path = $2 WHERE id = $3',
+      [status, finalFilePath, docId]
+    );
+  } else {
+    const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
+    const doc = data.kyc_docs.find(d => d.id === docId);
+    if (doc) {
+      doc.status = status;
+      doc.file_path = finalFilePath;
+      fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
+    }
+  }
+
+  // 2. Check if user has all required documents verified to auto-verify User
+  let shouldVerifyUser = false;
+  if (status === 'Verified') {
+    let docs = [];
+    if (isPg) {
+      const res = await pool.query('SELECT doc_type, status FROM bank_kyc_docs WHERE user_id = $1', [userId]);
+      docs = res.rows;
+    } else {
+      const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
+      docs = data.kyc_docs.filter(d => d.user_id === userId);
+    }
+
+    const hasPhoto = docs.some(d => d.doc_type === 'Photo' && d.status === 'Verified');
+    const identityDocs = ['Aadhaar', 'PAN', 'Passport'];
+    const uniqueVerifiedIds = new Set(
+      docs.filter(d => identityDocs.includes(d.doc_type) && d.status === 'Verified').map(d => d.doc_type)
+    );
+    
+    if (hasPhoto && uniqueVerifiedIds.size >= 2) {
+      shouldVerifyUser = true;
+    }
+  }
+
+  if (shouldVerifyUser) {
+    console.log(`[KYC HANDLER] Auto-Verifying KYC status for User ID ${userId}`);
+    await db.updateKYCStatus(userId, 'Verified');
+    await db.logAudit(userId, 'KYC_AUTO_VERIFIED', 'KYC auto-verified successfully after validating Photo and 2 ID documents.', '127.0.0.1');
+  } else if (status === 'Invalid') {
+    // If a document was marked invalid, user KYC status resets to Pending / Submitted
+    console.log(`[KYC HANDLER] Document marked invalid. Resetting KYC status checks.`);
+    await db.updateKYCStatus(userId, 'Pending');
+    await db.logAudit(userId, 'KYC_DOC_FAILED', `Document ${docType} was rejected. KYC validation remains incomplete.`, '127.0.0.1');
+  }
+
+  // 3. Write Security Audit Log
+  await db.logAudit(userId, `KYC_DOC_VALIDATION_${status.toUpperCase()}`, `Document ${docType} validation returned: ${status}. ${reason}`, '127.0.0.1');
+
+  // 4. Send Email Notification Alert
+  await sendKYCStatusEmail(email, docType, status, reason);
+}
+
+// -------------------------------------------------------------
+// LOCAL AZURE FUNCTION SIMULATOR (FOR LOCAL FALLBACK TESTING)
+// -------------------------------------------------------------
+function triggerLocalVerificationSimulator(userId, docId, docType, filename, originalname, mimeType) {
+  console.log(`[LOCAL FUNCTION SIMULATOR] Initiating validation for User ${userId}, Doc Type: ${docType}`);
+  
+  setTimeout(async () => {
+    try {
+      const user = await db.getUserById(userId);
+      if (!user) return;
+      
+      let isValid = false;
+      let reason = '';
+      
+      const nameLower = originalname.toLowerCase();
+      if (docType === 'Aadhaar') {
+        isValid = nameLower.includes('aadhar') || nameLower.includes('aadhaar') || nameLower.includes('uidai') || nameLower.includes('card');
+        reason = isValid ? 'Successfully verified 12-digit national identity format and digital seal.' : 'File name must contain Aadhaar identification keywords (e.g. "aadhar", "aadhaar", "uidai").';
+      } else if (docType === 'PAN') {
+        isValid = nameLower.includes('pan') || nameLower.includes('tax');
+        reason = isValid ? 'Successfully verified 10-digit PAN alphanumeric registration number.' : 'File name must contain PAN keywords (e.g. "pan", "tax").';
+      } else if (docType === 'Passport') {
+        isValid = nameLower.includes('passport') || nameLower.includes('pass') || nameLower.includes('travel');
+        reason = isValid ? 'Successfully verified passport MRZ zone alignment.' : 'File name must contain Passport keywords (e.g. "passport", "travel").';
+      } else if (docType === 'Photo') {
+        isValid = mimeType.startsWith('image/') || nameLower.match(/\.(jpg|jpeg|png)$/);
+        reason = isValid ? 'Biometric validation successful: detected standard face profile.' : 'Profile Photo must be a valid image file (JPG or PNG).';
+      } else {
+        isValid = true;
+        reason = 'Verification successful.';
+      }
+
+      let finalFileName = filename;
+      if (isValid) {
+        // Query form details for DOB fallback
+        const kycForm = await db.getKycForm(userId);
+        const dob = kycForm ? kycForm.dob : '01-01-1990';
+        
+        const sanitizedName = user.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
+        const sanitizedDob = dob.replace(/[^0-9\-]/g, '');
+        const ext = path.extname(filename) || '.pdf';
+        finalFileName = `${sanitizedName}_${sanitizedDob}_${docType}${ext}`;
+
+        // Ensure processed directory exists
+        const processedDir = path.join(__dirname, 'uploads', 'processed_and_validated');
+        if (!fs.existsSync(processedDir)) {
+          fs.mkdirSync(processedDir, { recursive: true });
+        }
+
+        // Copy and delete original
+        const sourcePath = path.join(__dirname, 'uploads', filename);
+        const targetPath = path.join(processedDir, finalFileName);
+        if (fs.existsSync(sourcePath)) {
+          fs.copyFileSync(sourcePath, targetPath);
+          fs.unlinkSync(sourcePath);
+        }
+      } else {
+        // Clean up invalid local file
+        const sourcePath = path.join(__dirname, 'uploads', filename);
+        if (fs.existsSync(sourcePath)) {
+          fs.unlinkSync(sourcePath);
+        }
+      }
+
+      // Publish message to local mock Service Bus
+      await publishMockServiceBusMessage({
+        userId,
+        docId,
+        docType,
+        status: isValid ? 'Verified' : 'Invalid',
+        reason,
+        fileName: finalFileName,
+        email: user.email
+      });
+
+    } catch (err) {
+      console.error('[LOCAL FUNCTION SIMULATOR] Simulation error:', err.message);
+    }
+  }, 2500);
+}
 
 // -------------------------------------------------------------
 // DATABASE SETUP & CONFIGURATION (PostgreSQL / JSON Fallback)
@@ -1118,38 +1401,57 @@ app.post('/api/kyc/upload', authenticateToken, (req, res) => {
     const docType = req.body.doc_type || 'Document';
     let finalFilePath = req.file.path;
 
-    // If Azure Storage is configured, upload to Azure and delete local copy
-    if (containerClient) {
-      try {
-        const blobName = req.file.filename;
-        const blockBlobClient = containerClient.getBlockBlobClient(blobName);
-        
-        // Upload to Azure
-        await blockBlobClient.uploadFile(req.file.path);
-        console.log(`[AZURE STORAGE] Uploaded blob "${blobName}" successfully.`);
-        
-        // Update database file path to point to Azure
-        finalFilePath = `azure://${containerName}/${blobName}`;
-
-        // Delete the temporary local file
-        fs.unlink(req.file.path, (unlinkErr) => {
-          if (unlinkErr) console.error('[AZURE STORAGE] Failed to delete local temp file:', unlinkErr.message);
-        });
-      } catch (azureErr) {
-        console.error('[AZURE STORAGE] Blob upload failed:', azureErr.message);
-        return res.status(500).json({ error: 'Failed to upload document to cloud storage.' });
-      }
-    }
-
     try {
+      // 1. Create the document record in the database first to get the unique docId
       const docId = await db.uploadKYC(req.user.id, {
         fileName: req.file.filename,
         originalName: `${docType}: ${req.file.originalname}`,
-        filePath: finalFilePath,
+        filePath: finalFilePath, // This will be updated if Azure uploads successfully
         mimeType: req.file.mimetype,
         docType: docType
       });
+
+      // 2. If Azure Storage is configured, upload to Azure and delete local copy
+      if (containerClient) {
+        try {
+          const blobName = req.file.filename;
+          const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+          
+          // Upload to Azure with custom metadata
+          await blockBlobClient.uploadFile(req.file.path, {
+            metadata: {
+              doc_type: docType,
+              doc_id: docId.toString(),
+              user_id: req.user.id.toString()
+            }
+          });
+          console.log(`[AZURE STORAGE] Uploaded blob "${blobName}" with metadata successfully.`);
+          
+          // Update database file path to point to Azure
+          finalFilePath = `azure://${containerName}/${blobName}`;
+          if (isPg) {
+            await pool.query('UPDATE bank_kyc_docs SET file_path = $1 WHERE id = $2', [finalFilePath, docId]);
+          } else {
+            const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
+            const dbDoc = data.kyc_docs.find(d => d.id === docId);
+            if (dbDoc) {
+              dbDoc.file_path = finalFilePath;
+              fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
+            }
+          }
+
+          // Delete the temporary local file
+          fs.unlink(req.file.path, (unlinkErr) => {
+            if (unlinkErr) console.error('[AZURE STORAGE] Failed to delete local temp file:', unlinkErr.message);
+          });
+        } catch (azureErr) {
+          console.error('[AZURE STORAGE] Blob upload failed:', azureErr.message);
+          return res.status(500).json({ error: 'Failed to upload document to cloud storage.' });
+        }
+      }
+
       await db.logAudit(req.user.id, 'KYC_SUBMITTED', `Submitted ${docType} document: ${req.file.originalname}`, req.ip);
+      
       res.json({
         message: `${docType} document uploaded successfully for verification.`,
         docId: docId,
@@ -1184,60 +1486,31 @@ app.post('/api/kyc/validate', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Document not found.' });
     }
 
-    // Simulate OCR / identity scan processing delay
-    await new Promise(resolve => setTimeout(resolve, 1200));
-
-    const docType = doc.doc_type || 'Document';
-    const originalNameLower = doc.original_name.toLowerCase();
-    
-    let isValid = false;
-    let reason = '';
-
-    if (docType === 'Aadhaar') {
-      isValid = originalNameLower.includes('aadhar') || originalNameLower.includes('aadhaar') || originalNameLower.includes('uidai') || originalNameLower.includes('card');
-      reason = isValid ? 'Successfully verified 12-digit national identity format and digital seal.' : 'File name must contain Aadhaar identification keywords (e.g. "aadhar", "aadhaar", "uidai").';
-    } else if (docType === 'PAN') {
-      isValid = originalNameLower.includes('pan') || originalNameLower.includes('tax');
-      reason = isValid ? 'Successfully verified 10-digit PAN alphanumeric registration number.' : 'File name must contain PAN identification keywords (e.g. "pan", "tax").';
-    } else if (docType === 'Passport') {
-      isValid = originalNameLower.includes('passport') || originalNameLower.includes('pass') || originalNameLower.includes('travel');
-      reason = isValid ? 'Successfully verified passport travel booklet MRZ zone alignment.' : 'File name must contain Passport identification keywords (e.g. "passport", "travel").';
-    } else if (docType === 'Photo') {
-      isValid = originalNameLower.includes('photo') || originalNameLower.includes('pic') || originalNameLower.includes('image') || originalNameLower.includes('face') || originalNameLower.includes('avatar') || originalNameLower.includes('profile') || originalNameLower.includes('jpg') || originalNameLower.includes('png');
-      reason = isValid ? 'Biometric validation successful: detected standard high-contrast face profile.' : 'File name must contain Photo/Image keywords (e.g. "photo", "pic", "image").';
-    } else {
-      isValid = true;
-      reason = 'Document verification successful.';
-    }
-
-    const newStatus = isValid ? 'Verified' : 'Invalid';
-
-    // Update status in DB
-    if (isPg) {
-      await pool.query('UPDATE bank_kyc_docs SET status = $1 WHERE id = $2', [newStatus, docId]);
-    } else {
-      const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
-      const dbDoc = data.kyc_docs.find(d => d.id === parseInt(docId));
-      if (dbDoc) {
-        dbDoc.status = newStatus;
-        fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
-      }
-    }
-
-    // Write audit log
-    await db.logAudit(req.user.id, `KYC_DOC_VALIDATION_${newStatus.toUpperCase()}`, `Document validation for ${docType} returned: ${newStatus}. ${reason}`, req.ip);
-
-    if (isValid) {
+    // If Azure storage is active, validation is handled in the cloud by the Blob Trigger Azure Function
+    if (containerClient) {
       res.json({
         success: true,
-        status: 'Verified',
-        message: `Validation Successful! ${reason}`
+        status: 'Pending',
+        message: 'Document uploaded to Azure. Validation is being processed asynchronously by the Azure Function.'
       });
     } else {
-      res.status(422).json({
-        success: false,
-        status: 'Invalid',
-        error: `Validation Failed. ${reason}`
+      // If running locally, run the local simulator in the background
+      const docType = doc.doc_type || 'Document';
+      const originalname = doc.original_name.replace(`${docType}: `, '');
+      
+      triggerLocalVerificationSimulator(
+        req.user.id,
+        doc.id,
+        docType,
+        doc.file_name,
+        originalname,
+        doc.mime_type || 'application/pdf'
+      );
+
+      res.json({
+        success: true,
+        status: 'Pending',
+        message: 'Local verification initiated. Simulated Azure Function validation is processing in the background.'
       });
     }
   } catch (error) {
@@ -3887,6 +4160,7 @@ app.get('*', (req, res) => {
 
 // Run DB init and Startup Server
 initDb().then(() => {
+  initServiceBus();
   app.listen(PORT, () => {
     console.log(`================================================================`);
     console.log(`Apex Premium Banking Server running at http://localhost:${PORT}`);

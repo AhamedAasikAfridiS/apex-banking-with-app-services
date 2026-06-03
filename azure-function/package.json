@@ -1,0 +1,17 @@
+{
+  "name": "apex-kyc-validator",
+  "version": "1.0.0",
+  "description": "Azure Function for Apex Banking KYC validation",
+  "main": "src/functions/*.js",
+  "scripts": {
+    "start": "func start",
+    "test": "echo \"No tests configured\""
+  },
+  "dependencies": {
+    "@azure/ai-form-recognizer": "^12.3.0",
+    "@azure/functions": "^4.0.0",
+    "@azure/service-bus": "^7.9.5",
+    "@azure/storage-blob": "^12.12.0",
+    "pg": "^8.11.5"
+  }
+}
