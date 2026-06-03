@@ -52,4 +52,4 @@ jobs:
           app-name: 'aasik'
           slot-name: 'Production'
           package: .
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_1C8EFD972DB64AC7ACB6A5F5CACFB86F }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_7EEF0C41AA874E838541907166ECA5C2 }}
