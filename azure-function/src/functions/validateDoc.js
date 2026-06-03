@@ -90,6 +90,9 @@ app.storageBlob('BlobTrigger1', {
           throw new Error(`Unsupported document extension for OCR: .${ext}`);
         }
 
+        // Log snippet of extracted text for debugging
+        context.log(`[KYC TRIGGER] Extracted Text Snippet: "${textContent.substring(0, 300).replace(/\n/g, ' ')}"`);
+
         // Try extracting Date of Birth (DOB) from the OCR text
         // Looks for DD/MM/YYYY or DD-MM-YYYY format
         const dobRegex = /\b(\d{2})[-/](\d{2})[-/](\d{4})\b/;
