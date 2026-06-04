@@ -3841,38 +3841,38 @@ const htmlTemplate = `
             
             let ocrInfoHtml = '';
             if (d.status === 'Pending') {
-              ocrInfoHtml = `
+              ocrInfoHtml = \`
                 <div style="font-size: 0.75rem; border-left: 2px solid var(--accent); padding-left: 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;">
                   <span style="font-weight: 600; color: var(--accent);">⏳ OCR Status: Validation Pending</span>
                   <span style="font-size: 0.7rem; color: #a0aec0;">Document is currently queued in the Service Bus for automated OCR validation...</span>
                 </div>
-              `;
+              \`;
             } else if (d.status === 'Verified') {
-              ocrInfoHtml = `
+              ocrInfoHtml = \`
                 <div style="font-size: 0.75rem; border-left: 2px solid var(--accent-success); padding-left: 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;">
                   <span style="font-weight: 600; color: var(--accent-success);">✅ OCR Validation Success</span>
-                  <span style="font-size: 0.7rem; color: #a0aec0;">${d.ocr_details || 'The document layout and identification credentials verified successfully.'}</span>
+                  <span style="font-size: 0.7rem; color: #a0aec0;">\${d.ocr_details || 'The document layout and credentials verified successfully.'}</span>
                 </div>
-              `;
+              \`;
             } else {
-              ocrInfoHtml = `
+              ocrInfoHtml = \`
                 <div style="font-size: 0.75rem; border-left: 2px solid var(--accent-danger); padding-left: 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;">
                   <span style="font-weight: 600; color: var(--accent-danger);">❌ OCR Validation Failed</span>
-                  <span style="font-size: 0.7rem; color: #a0aec0;">${d.ocr_details || 'The document failed authenticity check or text pattern validation.'}</span>
+                  <span style="font-size: 0.7rem; color: #a0aec0;">\${d.ocr_details || 'The document failed authenticity check or text pattern validation.'}</span>
                 </div>
-              `;
+              \`;
             }
 
-            row.innerHTML = `
+            row.innerHTML = \`
               <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                <span style="font-weight: 600; color: var(--text-white);">📄 ${d.original_name} (${d.doc_type})</span>
+                <span style="font-weight: 600; color: var(--text-white);">📄 \${d.original_name} (\${d.doc_type})</span>
                 <span style="display: flex; align-items: center; gap: 8px;">
-                  <span style="font-size: 0.7rem; padding: 2px 8px; border-radius: 12px; background: ${statusColor}; color: white; font-weight: 600;">${d.status || 'Pending'}</span>
+                  <span style="font-size: 0.7rem; padding: 2px 8px; border-radius: 12px; background: \${statusColor}; color: white; font-weight: 600;">\${d.status || 'Pending'}</span>
                 </span>
               </div>
-              ${ocrInfoHtml}
-              <div style="color: var(--text-dark); font-size: 0.7rem; align-self: flex-end;">Uploaded: ${new Date(d.uploaded_at).toLocaleString()}</div>
-            `;
+              \${ocrInfoHtml}
+              <div style="color: var(--text-dark); font-size: 0.7rem; align-self: flex-end;">Uploaded: \${new Date(d.uploaded_at).toLocaleString()}</div>
+            \`;
             docsList.appendChild(row);
           });
         } else {
