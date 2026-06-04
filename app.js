@@ -66,18 +66,18 @@ function initAzureStorage() {
     console.warn('[AZURE STORAGE] Connection String is not configured. Falling back to local filesystem (uploads/) for KYC documents.');
     return;
   }
-
+  
   try {
     // Parse the Storage Account Name to build the secondary endpoint for RA-GRS
     const match = connStr.match(/AccountName=([^;]+)/);
     const accountName = match ? match[1] : null;
     const options = {};
-
+    
     if (accountName) {
       options.geoRedundantSecondaryUri = `https://${accountName}-secondary.blob.core.windows.net`;
       console.log(`[AZURE STORAGE] Configuring with Geo-Redundant secondary URI: ${options.geoRedundantSecondaryUri}`);
     }
-
+    
     blobServiceClient = BlobServiceClient.fromConnectionString(connStr, options);
     containerClient = blobServiceClient.getContainerClient(containerName);
     console.log('[AZURE STORAGE] Client initialized successfully.');
@@ -185,7 +185,7 @@ function startServiceBusListener() {
         const body = message.body;
         console.log(`[SERVICE BUS] Received notification:`, body);
         const payload = typeof body === 'string' ? JSON.parse(body) : body;
-
+        
         await handleKYCNotification(payload);
         await message.complete();
       } catch (err) {
@@ -207,7 +207,7 @@ const localQueue = [];
 async function publishMockServiceBusMessage(payload) {
   console.log('[MOCK SERVICE BUS] Publishing message:', payload);
   localQueue.push(payload);
-
+  
   setTimeout(async () => {
     const msg = localQueue.shift();
     if (msg) {
@@ -229,7 +229,7 @@ async function handleKYCNotification(payload) {
   console.log(`[KYC HANDLER] Processing notification for User ${userId} | Doc ${docId} (${docType}) -> ${status}`);
 
   // 1. Update Document Status in Database
-  const finalFilePath = containerClient
+  const finalFilePath = containerClient 
     ? `azure://processed-and-validated-container/${fileName}`
     : `uploads/processed_and_validated/${fileName}`;
 
@@ -266,7 +266,7 @@ async function handleKYCNotification(payload) {
     const uniqueVerifiedIds = new Set(
       docs.filter(d => identityDocs.includes(d.doc_type) && d.status === 'Verified').map(d => d.doc_type)
     );
-
+    
     if (hasPhoto && uniqueVerifiedIds.size >= 2) {
       shouldVerifyUser = true;
     }
@@ -295,15 +295,15 @@ async function handleKYCNotification(payload) {
 // -------------------------------------------------------------
 function triggerLocalVerificationSimulator(userId, docId, docType, filename, originalname, mimeType) {
   console.log(`[LOCAL FUNCTION SIMULATOR] Initiating validation for User ${userId}, Doc Type: ${docType}`);
-
+  
   setTimeout(async () => {
     try {
       const user = await db.getUserById(userId);
       if (!user) return;
-
+      
       let isValid = false;
       let reason = '';
-
+      
       const nameLower = originalname.toLowerCase();
       if (docType === 'Aadhaar') {
         isValid = nameLower.includes('aadhar') || nameLower.includes('aadhaar') || nameLower.includes('uidai') || nameLower.includes('card');
@@ -327,7 +327,7 @@ function triggerLocalVerificationSimulator(userId, docId, docType, filename, ori
         // Query form details for DOB fallback
         const kycForm = await db.getKycForm(userId);
         const dob = kycForm ? kycForm.dob : '01-01-1990';
-
+        
         const sanitizedName = user.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
         const sanitizedDob = dob.replace(/[^0-9\-]/g, '');
         const ext = path.extname(filename) || '.pdf';
@@ -530,7 +530,7 @@ async function initDb() {
     if (!fs.existsSync(JSON_DB_PATH)) {
       fs.writeFileSync(JSON_DB_PATH, JSON.stringify({ users: [], transactions: [], kyc_docs: [], audit_logs: [], kyc_forms: [] }, null, 2));
     }
-
+    
     // Seed default admin in JSON
     const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
     data.users = (data.users || []).filter(u => u.email !== 'admin@apexbank.com');
@@ -831,7 +831,7 @@ db.uploadKYC = async (userId, { fileName, originalName, filePath, mimeType, docT
         'INSERT INTO bank_kyc_docs (user_id, file_name, original_name, file_path, mime_type, doc_type, status) VALUES ($1, $2, $3, $4, $5, $6, \'Pending\') RETURNING id',
         [userId, fileName, originalName, filePath, mimeType, docType]
       );
-
+      
       await client.query('COMMIT');
       return res.rows[0].id;
     } catch (e) {
@@ -856,7 +856,7 @@ db.uploadKYC = async (userId, { fileName, originalName, filePath, mimeType, docT
         status: 'Pending',
         uploaded_at: new Date().toISOString()
       });
-
+      
       fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
       return id;
     }
@@ -1424,7 +1424,7 @@ app.post('/api/kyc/upload', authenticateToken, (req, res) => {
         try {
           const blobName = req.file.filename;
           const blockBlobClient = containerClient.getBlockBlobClient(blobName);
-
+          
           // Upload to Azure with custom metadata
           await blockBlobClient.uploadFile(req.file.path, {
             metadata: {
@@ -1434,7 +1434,7 @@ app.post('/api/kyc/upload', authenticateToken, (req, res) => {
             }
           });
           console.log(`[AZURE STORAGE] Uploaded blob "${blobName}" with metadata successfully.`);
-
+          
           // Update database file path to point to Azure
           finalFilePath = `azure://${containerName}/${blobName}`;
           if (isPg) {
@@ -1459,7 +1459,7 @@ app.post('/api/kyc/upload', authenticateToken, (req, res) => {
       }
 
       await db.logAudit(req.user.id, 'KYC_SUBMITTED', `Submitted ${docType} document: ${req.file.originalname}`, req.ip);
-
+      
       res.json({
         message: `${docType} document uploaded successfully for verification.`,
         docId: docId,
@@ -1505,7 +1505,7 @@ app.post('/api/kyc/validate', authenticateToken, async (req, res) => {
       // If running locally, run the local simulator in the background
       const docType = doc.doc_type || 'Document';
       const originalname = doc.original_name.replace(`${docType}: `, '');
-
+      
       triggerLocalVerificationSimulator(
         req.user.id,
         doc.id,
@@ -1569,8 +1569,8 @@ app.post('/api/kyc/form-submit', authenticateToken, async (req, res) => {
     }
 
     if (!hasPhoto || uniqueIdCount < 2) {
-      return res.status(400).json({
-        error: 'You must upload a Passport Photo AND at least 2 ID documents (Aadhaar, PAN, or Passport) before you can submit the E-Form and signature.'
+      return res.status(400).json({ 
+        error: 'You must upload a Passport Photo AND at least 2 ID documents (Aadhaar, PAN, or Passport) before you can submit the E-Form and signature.' 
       });
     }
 
@@ -1611,12 +1611,12 @@ app.post('/api/admin/kyc-status', authenticateToken, requireAdmin, async (req, r
     if (!['Pending', 'Submitted', 'Verified'].includes(status)) {
       return res.status(400).json({ error: 'Invalid KYC status.' });
     }
-
+    
     // Self-approval check (Security Guardrail)
     if (req.user.id === parseInt(userId)) {
       return res.status(400).json({ error: 'Security Violations: Users cannot verify or approve their own KYC status.' });
     }
-
+    
     await db.updateKYCStatus(parseInt(userId), status);
     await db.logAudit(parseInt(userId), 'KYC_VERIFICATION', `KYC verification status changed to ${status} by admin.`, req.ip);
     res.json({ message: `KYC Status updated to ${status}.` });
@@ -1663,7 +1663,7 @@ app.get('/api/kyc/download/:filename', authenticateToken, async (req, res) => {
     if (doc.file_path && doc.file_path.startsWith('azure://') && containerClient) {
       try {
         const blockBlobClient = containerClient.getBlockBlobClient(filename);
-
+        
         // This initiates the download stream from Azure (supporting automatic failover retry if using RA-GRS options)
         const downloadResponse = await blockBlobClient.download(0);
         downloadResponse.readableStreamBody.pipe(res);
