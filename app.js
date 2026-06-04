@@ -235,8 +235,8 @@ async function handleKYCNotification(payload) {
 
   if (isPg) {
     await pool.query(
-      'UPDATE bank_kyc_docs SET status = $1, file_path = $2 WHERE id = $3',
-      [status, finalFilePath, docId]
+      'UPDATE bank_kyc_docs SET status = $1, file_path = $2, ocr_details = $3 WHERE id = $4',
+      [status, finalFilePath, reason || '', docId]
     );
   } else {
     const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
@@ -244,6 +244,7 @@ async function handleKYCNotification(payload) {
     if (doc) {
       doc.status = status;
       doc.file_path = finalFilePath;
+      doc.ocr_details = reason || '';
       fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2));
     }
   }
@@ -480,6 +481,7 @@ async function initDb() {
     `);
     await pool.query("ALTER TABLE bank_kyc_docs ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'Pending';");
     await pool.query("ALTER TABLE bank_kyc_docs ADD COLUMN IF NOT EXISTS doc_type VARCHAR(50);");
+    await pool.query("ALTER TABLE bank_kyc_docs ADD COLUMN IF NOT EXISTS ocr_details VARCHAR(1000);");
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS bank_audit_logs (
@@ -882,7 +884,7 @@ db.getAllUsers = async () => {
     const res = await pool.query(`
       SELECT u.id, u.name, u.email, u.balance, u.kyc_status, u.created_at,
              (SELECT COUNT(*) FROM bank_transactions t WHERE t.user_id = u.id) as tx_count,
-             (SELECT json_agg(k) FROM (SELECT file_name, original_name, uploaded_at, status, doc_type FROM bank_kyc_docs WHERE user_id = u.id) k) as documents,
+             (SELECT json_agg(k) FROM (SELECT file_name, original_name, uploaded_at, status, doc_type, ocr_details FROM bank_kyc_docs WHERE user_id = u.id) k) as documents,
              (SELECT row_to_json(f) FROM (SELECT dob, address, tax_id, income, occupation, signature_data, submitted_at FROM bank_kyc_forms WHERE user_id = u.id) f) as kyc_form
       FROM bank_users u ORDER BY u.id DESC
     `);
@@ -899,7 +901,8 @@ db.getAllUsers = async () => {
           original_name: d.original_name,
           uploaded_at: d.uploaded_at,
           status: d.status || 'Pending',
-          doc_type: d.doc_type || d.original_name.split(':')[0]
+          doc_type: d.doc_type || d.original_name.split(':')[0],
+          ocr_details: d.ocr_details || ''
         }));
       safeUser.kyc_form = (data.kyc_forms || []).find(f => f.user_id === u.id) || null;
       return safeUser;
@@ -1213,7 +1216,7 @@ app.get('/api/dashboard-data', authenticateToken, async (req, res) => {
     const txs = await db.getTransactions(userId, {});
     let uploadedDocs = [];
     if (isPg) {
-      const docsRes = await pool.query('SELECT id, file_name, original_name, uploaded_at, status, doc_type FROM bank_kyc_docs WHERE user_id = $1 ORDER BY uploaded_at DESC', [userId]);
+      const docsRes = await pool.query('SELECT id, file_name, original_name, uploaded_at, status, doc_type, ocr_details FROM bank_kyc_docs WHERE user_id = $1 ORDER BY uploaded_at DESC', [userId]);
       uploadedDocs = docsRes.rows;
     } else {
       const data = JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
@@ -1225,7 +1228,8 @@ app.get('/api/dashboard-data', authenticateToken, async (req, res) => {
           original_name: d.original_name,
           uploaded_at: d.uploaded_at,
           status: d.status || 'Pending',
-          doc_type: d.doc_type || d.original_name.split(':')[0]
+          doc_type: d.doc_type || d.original_name.split(':')[0],
+          ocr_details: d.ocr_details || ''
         }))
         .sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at));
     }
@@ -1309,6 +1313,10 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
     const numAmount = parseFloat(amount);
     if (isNaN(numAmount) || numAmount <= 0) {
       return res.status(400).json({ error: 'Transaction amount must be a positive number.' });
+    }
+
+    if (numAmount > 50000) {
+      return res.status(400).json({ error: "More than 50,000 transaction can't be done." });
     }
 
     await db.executeTransaction({
@@ -3504,6 +3512,12 @@ const htmlTemplate = `
       const targetEmail = document.getElementById('tx-recipient').value;
       const remark = document.getElementById('tx-remark').value;
       
+      const numAmount = parseFloat(amount);
+      if (numAmount > 50000) {
+        alert("More than 50,000 transaction can't be done.");
+        return;
+      }
+      
       try {
         const response = await fetch('/api/transactions', {
           method: 'POST',
@@ -3822,14 +3836,42 @@ const htmlTemplate = `
           docsList.innerHTML = '';
           data.uploadedDocs.forEach(d => {
             const row = document.createElement('div');
-            row.style.cssText = 'background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem;';
+            row.style.cssText = 'background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 15px; display: flex; flex-direction: column; gap: 8px; font-size: 0.85rem;';
             const statusColor = d.status === 'Verified' ? 'var(--accent-success)' : d.status === 'Invalid' ? 'var(--accent-danger)' : 'var(--accent-warning)';
+            
+            let ocrInfoHtml = '';
+            if (d.status === 'Pending') {
+              ocrInfoHtml = \`
+                <div style="font-size: 0.75rem; border-left: 2px solid var(--accent); padding-left: 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-weight: 600; color: var(--accent);">⏳ OCR Status: Validation Pending</span>
+                  <span style="font-size: 0.7rem; color: #a0aec0;">Document is currently queued in the Service Bus for automated OCR validation...</span>
+                </div>
+              \`;
+            } else if (d.status === 'Verified') {
+              ocrInfoHtml = \`
+                <div style="font-size: 0.75rem; border-left: 2px solid var(--accent-success); padding-left: 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-weight: 600; color: var(--accent-success);">✅ OCR Validation Success</span>
+                  <span style="font-size: 0.7rem; color: #a0aec0;">\${d.ocr_details || 'The document layout and credentials verified successfully.'}</span>
+                </div>
+              \`;
+            } else {
+              ocrInfoHtml = \`
+                <div style="font-size: 0.75rem; border-left: 2px solid var(--accent-danger); padding-left: 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-weight: 600; color: var(--accent-danger);">❌ OCR Validation Failed</span>
+                  <span style="font-size: 0.7rem; color: #a0aec0;">\${d.ocr_details || 'The document failed authenticity check or text pattern validation.'}</span>
+                </div>
+              \`;
+            }
+
             row.innerHTML = \`
-              <span style="font-weight: 500; color: var(--accent-hover);">📄 \${d.original_name}</span>
-              <span style="display: flex; align-items: center; gap: 10px;">
-                <span style="font-size: 0.7rem; padding: 2px 6px; border-radius: 8px; background: \${statusColor}; color: white; font-weight: 600;">\${d.status || 'Pending'}</span>
-                <span style="color: var(--text-dark); font-size: 0.75rem;">Uploaded: \${new Date(d.uploaded_at).toLocaleString()}</span>
-              </span>
+              <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                <span style="font-weight: 600; color: var(--text-white);">📄 \${d.original_name} (\${d.doc_type})</span>
+                <span style="display: flex; align-items: center; gap: 8px;">
+                  <span style="font-size: 0.7rem; padding: 2px 8px; border-radius: 12px; background: \${statusColor}; color: white; font-weight: 600;">\${d.status || 'Pending'}</span>
+                </span>
+              </div>
+              \${ocrInfoHtml}
+              <div style="color: var(--text-dark); font-size: 0.7rem; align-self: flex-end;">Uploaded: \${new Date(d.uploaded_at).toLocaleString()}</div>
             \`;
             docsList.appendChild(row);
           });

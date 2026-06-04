@@ -1,7 +1,7 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
 # More GitHub Actions for Azure: https://github.com/Azure/actions
 
-name: Build and deploy Node.js app to Azure Web App - apex-bank
+name: Build and deploy Node.js app to Azure Web App - apexbank-02
 
 on:
   push:
@@ -52,4 +52,4 @@ jobs:
           app-name: 'apexbank-02'
           slot-name: 'Production'
           package: .
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_A72314F3E1EB421CAA75F40EA98AF166 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5DF2DD78E4A84BF18EC1AE2A3BD6FC62 }}
