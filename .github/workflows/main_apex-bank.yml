@@ -49,7 +49,7 @@ jobs:
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'apex-bank'
+          app-name: 'apexbank-02'
           slot-name: 'Production'
           package: .
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_A72314F3E1EB421CAA75F40EA98AF166 }}
